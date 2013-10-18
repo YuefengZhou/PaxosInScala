@@ -12,7 +12,7 @@ object paxos {
     def value: Int = round * 10 + pid
   }
   case class MsgPrepare(fromId: Int, proposalNumber: ProposalNumber) {
-    override def toString() = "MsgPrepare(fromId:  " + fromId + ", Proposal Number: " + proposalNumber.value + ")"
+    override def toString() = "MsgPrepare(fromId: " + fromId + ", Proposal Number: " + proposalNumber.value + ")"
   }
   case class MsgPromise(fromId: Int, minProposal: Int, acceptedValue: Int) {
     override def toString() = "MsgPromise(fromId: " + fromId + ", minProposal: " + minProposal + ", acceptedValue: " + acceptedValue + ")"
@@ -25,7 +25,7 @@ object paxos {
   }
   object ProposerStatus extends Enumeration {
     type ProposerStatus = Value
-    val PREPARE, ACCEPTPROPOSING, CHOSEN = Value
+    val PREPARE, ACCEPTPROPOSING, CHOSEN, FAIL = Value
   }
   import ProposerStatus._
 
@@ -34,50 +34,68 @@ object paxos {
       var round = 0
       var proposalValue = pid
       var promised = 0
-      var status: ProposerStatus = ProposerStatus.PREPARE
 
       while (true) {
         round = round + 1
+        
         var promisedAcceptor = Set[OutputChannel[Any]]()
         var accepted = 0
         var rejected = 0
+        var status: ProposerStatus = ProposerStatus.PREPARE
+        
         acceptors map (acc => acc ! MsgPrepare(pid, ProposalNumber(round, pid)))
         acceptors map (acc => println(this.toString + " Send " + MsgPrepare(pid, ProposalNumber(round, pid)).toString))
-        while (true) {
+        while (status != ProposerStatus.FAIL) {
           receiveWithin(1000) {
             case MsgPromise(aid, minProposal, acceptedValue) => {
               if (status != ProposerStatus.PREPARE) {
-                //TODO
+                if (promisedAcceptor contains sender)
+                  println(this.toString + " Panic: Got unexpected: " + MsgPromise(aid, minProposal, acceptedValue).toString)
+                else {
+                  promisedAcceptor = promisedAcceptor + sender
+                  sender ! MsgAccept(pid, ProposalNumber(round, pid), proposalValue)
+                  println(this.toString + " Send " + MsgAccept(pid, ProposalNumber(round, pid), proposalValue).toString)
+                }
               } else {
                 println(this.toString + " Receive " + MsgPromise(aid, minProposal, acceptedValue).toString)
                 if (minProposal > ProposalNumber(round, pid).value)
                   proposalValue = if (acceptedValue != -1) acceptedValue else proposalValue
-              }
-              promisedAcceptor = promisedAcceptor + sender
-              if (promisedAcceptor.size >= quoram) {
-                promisedAcceptor map (acc => acc ! MsgAccept(pid, ProposalNumber(round, pid), proposalValue))
-                promisedAcceptor map (acc => println(this.toString + " Send " + MsgAccept(pid, ProposalNumber(round, pid), proposalValue).toString))
-                status = ProposerStatus.ACCEPTPROPOSING
+                  
+                promisedAcceptor = promisedAcceptor + sender
+	            if (promisedAcceptor.size >= quoram) {
+	              promisedAcceptor map (acc => acc ! MsgAccept(pid, ProposalNumber(round, pid), proposalValue))
+	              promisedAcceptor map (acc => println(this.toString + " Send " + MsgAccept(pid, ProposalNumber(round, pid), proposalValue).toString))
+	              status = ProposerStatus.ACCEPTPROPOSING
+	            }
               }
             }
             case MsgAccepted(aid, proposal) => {
               if (status != ProposerStatus.ACCEPTPROPOSING) {
-                //TODO
+                if (status != ProposerStatus.CHOSEN)
+                  println(this.toString + " Panic: Got unexpected: " + MsgAccepted(aid, proposal).toString)
               } else {
                 println(this.toString + " Receive " + MsgAccepted(aid, proposal).toString + ". Current Proposal Number: " + ProposalNumber(round, pid).value)
+                
                 if (proposal <= ProposalNumber(round, pid).value)
                   accepted = accepted + 1
                 else
                   rejected = rejected + 1
-                //TODO: Rejected
+                
+                // One thing still not clear: when is fail? rejected by one acceptor or majority?  
+                if (rejected >= quoram) {
+                  Thread.sleep(10 * 1000)
+                  status = ProposerStatus.FAIL
+                }
                 if (accepted >= quoram) {
                   learners map (learner => learner ! proposalValue)
                   learners map (learner => println(this.toString + " Send " + proposalValue))
+                  status = ProposerStatus.CHOSEN
+                  // When is next proposal?
                 }
               }
             }
             case TIMEOUT => {
-
+            	//TODO
             }
           }
         }
@@ -117,10 +135,12 @@ object paxos {
   }
   class Learner extends Actor {
     def act() {
-      receive {
-        case msg => {
-          println(this.toString + " Receive " + msg)
-        }
+      loop {
+	    react {
+	      case msg => {
+	        println(this.toString + " Receive " + msg)
+	      }
+	    }
       }
     }
     override def toString = "Learner"
@@ -137,5 +157,4 @@ object main extends Application {
   acceptors map (acc => acc.start)
   learners map (lea => lea.start)
   proposers map (pro => pro.start)
-  println(proposers.size)
 }
