@@ -95,7 +95,7 @@ object paxos {
               }
             }
             case TIMEOUT => {
-            	//TODO
+              //TODO
             }
           }
         }
